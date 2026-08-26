@@ -1,0 +1,6 @@
+node_modules/
+dist/
+contract/managed/
+.env
+.env.*
+!.env.*.example

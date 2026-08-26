@@ -1,0 +1,135 @@
+pragma language_version >= 0.23;
+
+/// Shielded Chips — a contract that takes payment.
+///
+/// A house sells chips: you hand over a shielded coin, you get back freshly minted
+/// shielded chips of this contract's own token type. You can hand them to anyone,
+/// wallet to wallet, privately. Bring them back and the house pays out the stake.
+///
+/// Why this example exists: none of the official Midnight examples move a token.
+/// Counter, bboard, battleship, kitties, NFT and zkloan between them cover ledger
+/// state, commitments and proofs, but nothing calls `receiveShielded`,
+/// `mintShieldedToken` or `sendShielded`, so there is no worked answer to "how does
+/// a contract charge for something".
+///
+/// Three things worth reading the code for:
+///
+/// 1. **The chip color is `tokenType(domain, kernel.self())`** — derived from this
+///    contract's own address, so no other contract can mint a chip that this one
+///    would honour. The domain separator lets one contract issue several types.
+/// 2. **A coin created in this transaction has no Merkle index yet.** Spending it
+///    needs `sendImmediateShielded`; only a coin already on the ledger (a
+///    `QualifiedShieldedCoinInfo`, which is what the vault stores) can go through
+///    `sendShielded`.
+/// 3. **A contract-initiated mint writes no coin ciphertext.** A wallet cannot find
+///    a coin by scanning for it, so the minted `ShieldedCoinInfo` returned here is
+///    the only record of it. That is safe in this contract because the recipient is
+///    the caller, who receives the return value from their own transaction. Minting
+///    to a *third party* would strand the value unless the info were delivered out
+///    of band.
+///
+/// ⚠️ The vault's holdings are public. `takings` is exported ledger state, so the
+/// float is readable off-chain in plaintext — nonce, color, value and Merkle index.
+/// "Shielded" describes the token rail, not the contract's balance. A contract that
+/// must hide its own holdings has to keep the coin off its ledger and have the
+/// spender supply it at call time.
+///
+/// Compiled and driven with compactc 0.31.1 / language 0.23; `demo.mjs` runs the
+/// whole flow against `@midnight-ntwrk/compact-runtime`.
+
+import CompactStandardLibrary;
+
+export ledger house: Bytes<32>;
+export ledger priceColor: Bytes<32>;
+export ledger pricePerChip: Uint<64>;
+export ledger chipsIssued: Uint<64>;
+export ledger takings: Map<Bytes<32>, QualifiedShieldedCoinInfo>;
+
+witness secretKey(): Bytes<32>;
+witness chipNonce(): Bytes<32>;
+
+circuit identityOf(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "chips:identity:v1"), sk]);
+}
+
+circuit chipDomain(): Bytes<32> {
+  return pad(32, "chips:chip:v1");
+}
+
+constructor(_priceColor: Bytes<32>, _pricePerChip: Uint<64>) {
+  house = disclose(identityOf(secretKey()));
+  priceColor = disclose(_priceColor);
+  chipsIssued = 0;
+  pricePerChip = disclose(_pricePerChip);
+}
+
+export circuit chipColor(): Bytes<32> {
+  return tokenType(chipDomain(), kernel.self());
+}
+
+export circuit buyChips(payment: ShieldedCoinInfo, count: Uint<64>): ShieldedCoinInfo {
+  assert(payment.color == disclose(priceColor), "wrong currency");
+  // Uint<64> * Uint<64> is representable in Uint<128>, so the product cannot overflow.
+  const due = count * pricePerChip;
+  assert(payment.value >= due, "underpaid");
+
+  receiveShielded(disclose(payment));
+
+  const color = disclose(payment.color);
+  if (takings.member(color)) {
+    const merged = mergeCoinImmediate(takings.lookup(color), disclose(payment));
+    takings.insertCoin(color, merged, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
+  } else {
+    takings.insertCoin(color, disclose(payment), right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
+  }
+
+  chipsIssued = disclose((chipsIssued + count) as Uint<64>);
+
+  return mintShieldedToken(
+    chipDomain(),
+    disclose(count),
+    disclose(chipNonce()),
+    left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey())
+  );
+}
+
+/// Hand chips back and take the stake out again.
+///
+/// The chips are received, then immediately burned: a coin created in this same
+/// transaction has no Merkle index yet, so it must be spent with
+/// `sendImmediateShielded` rather than `sendShielded`.
+export circuit cashOut(chips: ShieldedCoinInfo): [] {
+  assert(chips.color == chipColor(), "not a chip of this house");
+  const count = chips.value as Uint<64>;
+  // Cashing out reveals how many chips are being redeemed: the payout is derived
+  // from the chip coin's value, so the compiler requires it be disclosed before it
+  // can reach a send. Refusing to disclose here is not an option — it would link a
+  // spend to a receive without saying so, which is the leak `disclose` exists to
+  // make deliberate.
+  const owed = disclose(count * pricePerChip);
+
+  receiveShielded(disclose(chips));
+  sendImmediateShielded(disclose(chips), shieldedBurnAddress(), disclose(chips.value));
+
+  const color = disclose(priceColor);
+  assert(takings.member(color), "house has no float");
+  const float = takings.lookup(color);
+  assert(float.value >= owed, "house cannot cover this");
+
+  const result = sendShielded(float, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), owed);
+  takings.remove(color);
+  if (result.change.is_some) {
+    takings.insertCoin(color, result.change.value, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
+  }
+  chipsIssued = disclose((chipsIssued - count) as Uint<64>);
+}
+
+/// The house takes its winnings. Only the identity that deployed can call it.
+export circuit sweep(): [] {
+  assert(disclose(identityOf(secretKey())) == house, "not the house");
+  const color = disclose(priceColor);
+  assert(takings.member(color), "nothing to sweep");
+  const float = takings.lookup(color);
+  sendShielded(float, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), float.value);
+  takings.remove(color);
+}

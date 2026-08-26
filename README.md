@@ -1,72 +1,81 @@
-# Midnight Template Repository
+# Example Shielded Chips DApp
 
-This GitHub repository should be used as a template when creating a new Midnight GitHub repository.
-The template is configured with default repository settings and a set of default files that are expected to exist in all Midnight GitHub repositories.
+A Midnight contract that **takes payment**. A house sells chips: hand over a shielded
+coin and get back freshly minted chips of the contract's own token type. Chips move
+wallet to wallet like any other shielded coin. Bring them back and the house pays the
+stake out again.
 
-### LICENSE
+## Why this example
 
-Apache 2.0.
+The existing examples cover ledger state, commitments and proofs well — `counter`,
+`bboard`, `battleship`, `kitties`, `nft` / `nft-zk`, `zkloan` — but none of them moves
+a token. Between them they contain no call to `receiveShielded`, `mintShieldedToken`,
+`sendShielded`, `receiveUnshielded` or `tokenType`, so a developer asking *"how does my
+contract charge for something?"* has no worked answer to read.
 
-### README.md
+This fills that gap in the smallest contract that still shows the whole round trip:
+take a coin, bank it, mint against it, pay it back, and gate the till.
 
-Provides a brief description for users and developers who want to understand the purpose, setup, and usage of the repository.
+## The contract
 
-### SECURITY.md
+| circuit | what it demonstrates |
+|---|---|
+| `chipColor()` | `tokenType(domain, kernel.self())` — a token type bound to this contract's address, so no other deployment can mint a chip this one honours |
+| `buyChips(payment, count)` | `receiveShielded` to take the stake, `mergeCoinImmediate` + `insertCoin` to bank it, `mintShieldedToken` to issue chips to the caller |
+| `cashOut(chips)` | `sendImmediateShielded` to burn a coin created in this transaction, `sendShielded` to pay from the banked float, and re-banking the change |
+| `sweep()` | authority checked against a hash-derived identity |
 
-Provides a brief description of the Midnight Foundation's security policy and how to properly disclose security issues.
+## Four things worth reading the code for
 
-### CONTRIBUTING.md
+**1. A coin created in this transaction cannot be spent with `sendShielded`.** It has
+no Merkle index yet, so it is a `ShieldedCoinInfo` rather than a
+`QualifiedShieldedCoinInfo`. `cashOut` burns the incoming chips with
+`sendImmediateShielded` and pays out from the vault — which *is* qualified — with
+`sendShielded`.
 
-Provides guidelines for how people can contribute to the Midnight project.
+**2. A contract-initiated mint writes no coin ciphertext.** A wallet cannot discover
+the coin by scanning for it, so the `ShieldedCoinInfo` returned from `buyChips` is the
+only record that it exists. That is safe here because the recipient is the caller, who
+receives the return value from their own transaction. Minting to a *third party* would
+strand the value unless the coin info were delivered out of band — worth knowing before
+designing an airdrop.
 
-### CODEOWNERS
+**3. The compiler stops you leaking a correlation.** Paying out an amount derived from
+the private chip value refuses to compile:
 
-Defines repository ownership rules.
+> the call to standard-library circuit `sendShielded` might disclose a link between a
+> coin spend and the coin with the commitment given by a hash of the result of a
+> multiplication involving the witness value
 
-### ISSUE_TEMPLATE
+Cashing out genuinely does reveal how many chips are being redeemed, so the fix is an
+explicit `disclose` on the payout. The leak becomes deliberate and reviewable instead
+of silent — which is what `disclose` is for.
 
-Provides templates for reporting various types of issues, such as: bug report, documentation improvement and feature request.
+**4. Identity is derived, never supplied.** `sweep` compares `identityOf(secretKey())`
+against the house id stored at construction. There is no address parameter to lie
+about: a witness that returned the caller's *account* would be forgeable, because a
+witness is the caller's own code and returns whatever the caller chooses.
 
-### PULL_REQUEST_TEMPLATE
+## ⚠️ The vault's holdings are public
 
-Provides a template for a pull request.
+`takings` is exported ledger state, so the float is readable off-chain in plaintext —
+nonce, color, value and Merkle index. "Shielded" describes the token rail, not this
+contract's balance: chip transfers between wallets are private, what the house is
+holding is not. A contract that must hide its own float has to keep the coin off its
+ledger and have the spender supply it at call time.
 
-### CLA Assistant
+## Running it
 
-The Midnight Foundation appreciates contributions, and like many other open source projects asks contributors to sign a contributor
-License Agreement before accepting contributions. We use CLA assistant (https://github.com/cla-assistant/cla-assistant) to streamline the CLA
-signing process, enabling contributors to sign our CLAs directly within a GitHub pull request.
+Requires the Compact toolchain (language 0.23; developed against `compactc` 0.31.1).
 
-### Dependabot
+```bash
+npm install
+npm run compile      # compile contract/chips.compact -> contract/managed/chips
+npm test             # 8 tests, pure simulator: no node, no proof server, no docker
+npm run typecheck
+```
 
-The Midnight Foundation uses GitHub Dependabot feature to keep our projects dependencies up-to-date and address potential security vulnerabilities.
-
-### Checkmarx
-
-The Midnight Foundation uses Checkmarx for application security (AppSec) to identify and fix security vulnerabilities.
-All repositories are scanned with Checkmarx's suite of tools including: Static Application Security Testing (SAST), Infrastructure as Code (IaC), Software Composition Analysis (SCA), API Security, Container Security and Supply Chain Scans (SCS).
-
-### Unito
-
-Facilitates two-way data synchronization, automated workflows and streamline processes between: Jira, GitHub issues and Github project Kanban board.
-
-# TODO - New Repo Owner
-
-### Software Package Data Exchange (SPDX)
-Include the following Software Package Data Exchange (SPDX) short-form identifier in a comment at the top headers of each source code file.
-
-
- <I>// This file is part of <B>REPLACE WITH REPO-NAME</B>.<BR>
- // Copyright (C) Midnight Foundation<BR>
- // SPDX-License-Identifier: Apache-2.0<BR>
- // Licensed under the Apache License, Version 2.0 (the "License");<BR>
- // You may not use this file except in compliance with the License.<BR>
- // You may obtain a copy of the License at<BR>
- //<BR>
- //	https://www.apache.org/licenses/LICENSE-2.0<BR>
- //<BR>
- // Unless required by applicable law or agreed to in writing, software<BR>
- // distributed under the License is distributed on an "AS IS" BASIS,<BR>
- // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.<BR>
- // See the License for the specific language governing permissions and<BR>
- // limitations under the License.</I>
+The tests drive the contract through the compact runtime's circuit simulator, so the
+whole example runs offline. `src/chips-simulator.ts` chains the circuit context across
+calls and `setPlayer` swaps the acting secret — which is all "who is calling" means
+here.
