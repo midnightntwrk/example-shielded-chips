@@ -1,3 +1,10 @@
+> [!WARNING]
+> **This repository is archived and no longer maintained.**
+>
+> `example-shielded-chips` now lives in [midnight-examples](https://github.com/midnightntwrk/midnight-examples), Midnight's example monorepo, where every example compiles and runs against one pinned toolchain in CI.
+>
+> Use [`examples/shielded-chips`](https://github.com/midnightntwrk/midnight-examples/tree/main/examples/shielded-chips). This repo is read-only and will not be updated for future SDK releases.
+
 # Midnight Template Repository
 
 This GitHub repository should be used as a template when creating a new Midnight GitHub repository.
